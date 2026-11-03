@@ -1033,14 +1033,14 @@
     </div>
 
     <script>
-        const firebaseConfig = {  apiKey: "AIzaSyC3RM3iyHLTxgoSgmbl92uKRqHcr1JFyCA",
-  authDomain: "tkd-mythuan.firebaseapp.com",
-  databaseURL: "https://tkd-mythuan-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId: "tkd-mythuan",
-  storageBucket: "tkd-mythuan.firebasestorage.app",
-  messagingSenderId: "903899170919",
-  appId: "1:903899170919:web:383cd04f0cd9d085c9acc2",
-  measurementId: "G-EJ7VXXJVHL"
+        const firebaseConfig = {  apiKey: "AIzaSyDNt_hUr6yFJepLhl_7T72UA4x1XRr6siQ",
+            authDomain: "bangdiem2-36e35.firebaseapp.com",
+            databaseURL: "https://bangdiem2-36e35-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "bangdiem2-36e35",
+            storageBucket: "bangdiem2-36e35.firebasestorage.app",
+            messagingSenderId: "353096502641",
+            appId: "1:353096502641:web:bfe5608452627b12307ad0",
+            measurementId: "G-FVDT7J72SF"
         };
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
@@ -2067,12 +2067,77 @@
         renderBtInputsFromConfig();
         syncBtOccupationToFirebase();
 
-        let currentData = { bS: 0, rS: 0, bG: 0, rG: 0, bW: 0, rW: 0, round: 1, time: 120, run: false, isRest: false, isKyeShi: false, savedMatchTime: 0, rName: "HONG", bName: "CHUNG", rLogs: [], bLogs: [], gapEnabled: false, winnerDeclared: false, winSide: "", isPtg: false, maxGj: 0, maxPts: 0, oneRefMode: false, matchNum: 1, topTitle: "BẢNG ĐIỂM FOX-TAEKWONDO", matchContent: "", needTieBreaker: false, r6:0, r4:0, r3:0, r2:0, r1:0, b6:0, b4:0, b3:0, b2:0, b1:0, rR1:"", bR1:"", rR2:"", bR2:"", rR3:"", bR3:"", wR1:"", wR2:"", wR3:"", punR1:"", punR2:"", punR3:"", matchFinished: false, matchWinnerSide: "" };
+        let currentData = { bS: 0, rS: 0, bG: 0, rG: 0, bW: 0, rW: 0, round: 1, time: 120, run: false, isRest: false, isKyeShi: false, savedMatchTime: 0, rName: "HONG", bName: "CHUNG", rLogs: [], bLogs: [], gapEnabled: false, winnerDeclared: false, winSide: "", isPtg: false, maxGj: 0, maxPts: 0, oneRefMode: false, matchNum: 1, topTitle: "BẢNG ĐIỂM FOX-TAEKWONDO", matchContent: "", needTieBreaker: false, r6:0, r4:0, r3:0, r2:0, r1:0, b6:0, b4:0, b3:0, b2:0, b1:0, rR1:"", bR1:"", rR2:"", bR2:"", rR3:"", bR3:"", wR1:"", wR2:"", wR3:"", punR1:"", punR2:"", punR3:"", matchFinished: false, matchWinnerSide: "", timerUpdatedAt: 0 };
         let lastScores = { bS: 0, rS: 0 };
         let timerInterval = null;
+        let lastTimerTick = 0;
+        let lastSyncedWholeSec = -1;
+        let lastAppliedTimerUpdatedAt = 0;
         let recentHits = []; 
         let recentRefAwards = [];
         let recentDirectPoints = [];
+
+        // Bộ nhớ đệm DOM (DOM Diffing Cache) giúp hiển thị siêu mượt, không vẽ lại thừa
+        let domCache = {
+            timerText: "",
+            timerAlert: false,
+            timerPaused: false,
+            rLogsSig: "",
+            bLogsSig: "",
+            roundsSig: ""
+        };
+
+        // Kênh đồng bộ nội bộ tức thì (<1ms) giữa màn hình Thư Ký và màn hình Tivi trên cùng máy
+        const localSyncChannel = ('BroadcastChannel' in window) ? new BroadcastChannel('fox_tkd_fast_sync_v1') : null;
+
+        function isTvWindow() {
+            return urlParams.get('view') === 'tv' || sessionStorage.getItem('view_role') === 'tivi';
+        }
+
+        function broadcastLocalFastSync(type, payload) {
+            if (!localSyncChannel) return;
+            try {
+                localSyncChannel.postMessage({ type: type, payload: payload, ts: Date.now() });
+            } catch (e) {}
+        }
+
+        if (localSyncChannel) {
+            localSyncChannel.onmessage = (ev) => {
+                const msg = ev.data;
+                if (!msg) return;
+                if (msg.type === 'score_delta' && msg.payload) {
+                    const runningTime = currentData.time;
+                    const wasRunning = currentData.run;
+                    Object.assign(currentData, msg.payload);
+                    if (wasRunning && timerInterval) {
+                        currentData.time = runningTime;
+                    }
+                    renderScoreboardUI(currentData);
+                } else if (msg.type === 'timer_sync' && msg.payload) {
+                    Object.assign(currentData, msg.payload);
+                    if (msg.payload.timerUpdatedAt) {
+                        lastAppliedTimerUpdatedAt = msg.payload.timerUpdatedAt;
+                    }
+                    lastTimerTick = performance.now();
+                    if (currentData.run && !timerInterval) {
+                        startLocalTimer();
+                    } else if (!currentData.run && timerInterval) {
+                        stopLocalTimer();
+                    }
+                    updateTimerDisplay(currentData.time);
+                    renderScoreboardUI(currentData);
+                }
+            };
+        }
+
+        // Hàm áp dụng thay đổi điểm/lỗi NGAY LẬP TỨC (0ms delay) lên màn hình và chỉ gửi đúng trường thay đổi (Delta) lên Firebase
+        function applyScoreDeltaImmediate(deltaUpdates) {
+            Object.assign(currentData, deltaUpdates);
+            renderScoreboardUI(currentData);
+            broadcastLocalFastSync('score_delta', deltaUpdates);
+            matchRef.update(deltaUpdates);
+            checkVictoryConditions();
+        }
 
         function getSetMatchTime() {
             const m = parseInt(document.getElementById('in-min').value) || 0;
@@ -2115,19 +2180,25 @@
             if (!currentData.run || currentData.isRest || currentData.isKyeShi || currentData.winnerDeclared || currentData.matchFinished) return;
 
             const now = Date.now();
-            const ownerRef = btKeyboardConfig.stdKeyboardOwner;
-            if (ownerRef && !refToDeviceMap[ownerRef] && !isRefOccupiedByPhone(ownerRef)) {
-                const zoneMap = btKeyboardConfig[ownerRef];
-                if (zoneMap) {
-                    for (let act of BT_ACTIONS) {
-                        if (zoneMap[act] && zoneMap[act] === pressedKey) {
-                            e.preventDefault();
-                            if (act.match(/^[rb][123]$/)) {
-                                forwardToMatcher(act, ownerRef, now);
-                            } else if (act === 'rX' || act === 'bX') {
-                                applyRefXoay(act[0], ownerRef, now);
+            // Kiểm tra bàn phím chuẩn hoặc tất cả các vùng R1, R2, R3 chưa bị khóa bởi thiết bị khác
+            const checkOrderRefs = [];
+            if (btKeyboardConfig.stdKeyboardOwner) checkOrderRefs.push(btKeyboardConfig.stdKeyboardOwner);
+            BT_REFS.forEach(r => { if (!checkOrderRefs.includes(r)) checkOrderRefs.push(r); });
+
+            for (let refKey of checkOrderRefs) {
+                if (!refToDeviceMap[refKey] && !isRefOccupiedByPhone(refKey)) {
+                    const zoneMap = btKeyboardConfig[refKey];
+                    if (zoneMap) {
+                        for (let act of BT_ACTIONS) {
+                            if (zoneMap[act] && zoneMap[act] === pressedKey) {
+                                e.preventDefault();
+                                if (act.match(/^[rb][123]$/)) {
+                                    forwardToMatcher(act, refKey, now);
+                                } else if (act === 'rX' || act === 'bX') {
+                                    applyRefXoay(act[0], refKey, now);
+                                }
+                                return;
                             }
-                            return;
                         }
                     }
                 }
@@ -2159,9 +2230,9 @@
             }
         }
 
-        matchRef.on('value', (snap) => {
-            const data = snap.val(); if(!data) return;
-            
+        // Hàm render giao diện siêu tốc (chỉ cập nhật những phần tử DOM thực sự thay đổi)
+        function renderScoreboardUI(data) {
+            if (!data) return;
             data.rLogs = data.rLogs || [];
             data.bLogs = data.bLogs || [];
 
@@ -2182,53 +2253,61 @@
                 }
                 
                 overlay.innerText = wName;
-                
                 let nameLen = Math.max(wName.length, 4); 
                 overlay.style.fontSize = `min(8.5vh, ${46 / nameLen}vw)`;
-                
             } else {
                 document.body.classList.remove('match-finished');
                 overlay.style.display = 'none';
             }
 
-            document.getElementById('in-max-pts').value = data.maxPts || 0;
-            document.getElementById('in-max-gj').value = data.maxGj || 0;
+            const inMaxPts = document.getElementById('in-max-pts');
+            const inMaxGj = document.getElementById('in-max-gj');
+            if (document.activeElement !== inMaxPts) inMaxPts.value = data.maxPts || 0;
+            if (document.activeElement !== inMaxGj) inMaxGj.value = data.maxGj || 0;
 
             if (data.bS !== lastScores.bS) { flash('blue-box', 'flash'); lastScores.bS = data.bS; }
             if (data.rS !== lastScores.rS) { flash('red-box', 'flash'); lastScores.rS = data.rS; }
             
+            const bScoreEl = document.getElementById('b-score');
+            const rScoreEl = document.getElementById('r-score');
+
             if (data.matchFinished) {
-                document.getElementById('b-score').innerText = data.bW || 0;
-                document.getElementById('r-score').innerText = data.rW || 0;
-                adjustScoreSize('b-score', data.bW || 0, data.matchFinished); 
-                adjustScoreSize('r-score', data.rW || 0, data.matchFinished);
+                const bWVal = String(data.bW || 0);
+                const rWVal = String(data.rW || 0);
+                if (bScoreEl.innerText !== bWVal) bScoreEl.innerText = bWVal;
+                if (rScoreEl.innerText !== rWVal) rScoreEl.innerText = rWVal;
+                adjustScoreSize('b-score', data.bW || 0, true); 
+                adjustScoreSize('r-score', data.rW || 0, true);
             } else {
-                document.getElementById('b-score').innerText = data.bS;
-                document.getElementById('r-score').innerText = data.rS;
-                adjustScoreSize('b-score', data.bS, data.matchFinished); 
-                adjustScoreSize('r-score', data.rS, data.matchFinished);
+                const bSVal = String(data.bS || 0);
+                const rSVal = String(data.rS || 0);
+                if (bScoreEl.innerText !== bSVal) bScoreEl.innerText = bSVal;
+                if (rScoreEl.innerText !== rSVal) rScoreEl.innerText = rSVal;
+                adjustScoreSize('b-score', data.bS || 0, false); 
+                adjustScoreSize('r-score', data.rS || 0, false);
             }
 
-            document.getElementById('r-r1-score').innerHTML = getRoundHTML('r', 'R1', data.rR1, data.wR1, data.punR1);
-            document.getElementById('r-r2-score').innerHTML = getRoundHTML('r', 'R2', data.rR2, data.wR2, data.punR2);
-            document.getElementById('r-r3-score').innerHTML = getRoundHTML('r', 'R3', data.rR3, data.wR3, data.punR3);
+            const newRoundsSig = `${data.rR1}|${data.bR1}|${data.wR1}|${data.punR1}||${data.rR2}|${data.bR2}|${data.wR2}|${data.punR2}||${data.rR3}|${data.bR3}|${data.wR3}|${data.punR3}`;
+            if (newRoundsSig !== domCache.roundsSig) {
+                domCache.roundsSig = newRoundsSig;
+                document.getElementById('r-r1-score').innerHTML = getRoundHTML('r', 'R1', data.rR1, data.wR1, data.punR1);
+                document.getElementById('r-r2-score').innerHTML = getRoundHTML('r', 'R2', data.rR2, data.wR2, data.punR2);
+                document.getElementById('r-r3-score').innerHTML = getRoundHTML('r', 'R3', data.rR3, data.wR3, data.punR3);
 
-            document.getElementById('b-r1-score').innerHTML = getRoundHTML('b', 'R1', data.bR1, data.wR1, data.punR1);
-            document.getElementById('b-r2-score').innerHTML = getRoundHTML('b', 'R2', data.bR2, data.wR2, data.punR2);
-            document.getElementById('b-r3-score').innerHTML = getRoundHTML('b', 'R3', data.bR3, data.wR3, data.punR3);
-
-            const rScoreEl = document.getElementById('r-score');
-            const bScoreEl = document.getElementById('b-score');
+                document.getElementById('b-r1-score').innerHTML = getRoundHTML('b', 'R1', data.bR1, data.wR1, data.punR1);
+                document.getElementById('b-r2-score').innerHTML = getRoundHTML('b', 'R2', data.bR2, data.wR2, data.punR2);
+                document.getElementById('b-r3-score').innerHTML = getRoundHTML('b', 'R3', data.bR3, data.wR3, data.punR3);
+            }
             
-            let compareRS = data.matchFinished ? (data.rW || 0) : data.rS;
-            let compareBS = data.matchFinished ? (data.bW || 0) : data.bS;
+            let compareRS = data.matchFinished ? (data.rW || 0) : (data.rS || 0);
+            let compareBS = data.matchFinished ? (data.bW || 0) : (data.bS || 0);
 
             if (compareRS > compareBS) {
                 rScoreEl.style.color = "var(--gold)"; bScoreEl.style.color = "white";
             } else if (compareBS > compareRS) {
                 bScoreEl.style.color = "var(--gold)"; rScoreEl.style.color = "white";
             } else {
-                if(!data.matchFinished) {
+                if (!data.matchFinished) {
                     let tieWinner = autoCheckTieBreak(data);
                     if (tieWinner === 'red') {
                         rScoreEl.style.color = "var(--gold)"; bScoreEl.style.color = "white";
@@ -2242,72 +2321,89 @@
                 }
             }
 
-            document.getElementById('b-gj').innerText = data.bG;
-            document.getElementById('r-gj').innerText = data.rG;
-            document.getElementById('r-name-display').innerText = data.rName || "HONG";
-            document.getElementById('b-name-display').innerText = data.bName || "CHUNG";
+            const bGjEl = document.getElementById('b-gj');
+            const rGjEl = document.getElementById('r-gj');
+            const bGjStr = String(data.bG || 0);
+            const rGjStr = String(data.rG || 0);
+            if (bGjEl.innerText !== bGjStr) bGjEl.innerText = bGjStr;
+            if (rGjEl.innerText !== rGjStr) rGjEl.innerText = rGjStr;
+
+            const rNameDisp = document.getElementById('r-name-display');
+            const bNameDisp = document.getElementById('b-name-display');
+            if (rNameDisp.innerText !== (data.rName || "HONG")) rNameDisp.innerText = data.rName || "HONG";
+            if (bNameDisp.innerText !== (data.bName || "CHUNG")) bNameDisp.innerText = data.bName || "CHUNG";
             
-            document.getElementById('in-r-name').value = data.rName || "";
-            document.getElementById('in-b-name').value = data.bName || "";
-            document.getElementById('in-match-num').value = data.matchNum || 1;
+            const inRName = document.getElementById('in-r-name');
+            const inBName = document.getElementById('in-b-name');
+            const inMatchNum = document.getElementById('in-match-num');
+            if (document.activeElement !== inRName) inRName.value = data.rName || "";
+            if (document.activeElement !== inBName) inBName.value = data.bName || "";
+            if (document.activeElement !== inMatchNum) inMatchNum.value = data.matchNum || 1;
             
             const timerDisplay = document.getElementById('timer-display');
             const roundText = document.getElementById('round-text');
             const roundNum = document.getElementById('round-num-display');
+            const mainConsole = document.getElementById('main-console');
 
-            if(data.isRest) {
-                roundText.innerText = "REST"; roundNum.innerText = "TIME"; roundNum.style.fontSize = "min(10.5vh, 6.5vw)"; 
-                document.getElementById('main-console').classList.add('rest-mode');
+            if (data.isRest) {
+                if (roundText.innerText !== "REST") roundText.innerText = "REST";
+                if (roundNum.innerText !== "TIME") roundNum.innerText = "TIME";
+                roundNum.style.fontSize = "min(10.5vh, 6.5vw)"; 
+                mainConsole.classList.add('rest-mode');
                 timerDisplay.classList.remove('timer-paused');
             } else {
                 if (data.round >= 4 || data.matchFinished) {
-                    roundText.innerText = "MATCH"; roundNum.innerText = "END"; roundNum.style.fontSize = "min(8.2vh, 5.2vw)"; 
+                    if (roundText.innerText !== "MATCH") roundText.innerText = "MATCH";
+                    if (roundNum.innerText !== "END") roundNum.innerText = "END";
+                    roundNum.style.fontSize = "min(8.2vh, 5.2vw)"; 
                 } else {
-                    roundText.innerText = "ROUND"; roundNum.innerText = data.round; roundNum.style.fontSize = "min(12.5vh, 7.8vw)"; 
+                    if (roundText.innerText !== "ROUND") roundText.innerText = "ROUND";
+                    const rStr = String(data.round || 1);
+                    if (roundNum.innerText !== rStr) roundNum.innerText = rStr;
+                    roundNum.style.fontSize = "min(12.5vh, 7.8vw)"; 
                 }
-                document.getElementById('main-console').classList.remove('rest-mode');
+                mainConsole.classList.remove('rest-mode');
                 if (!data.run && data.time > 0) timerDisplay.classList.add('timer-paused');
                 else timerDisplay.classList.remove('timer-paused');
             }
 
-            const mainConsole = document.getElementById('main-console');
-            if(data.isKyeShi) { mainConsole.classList.add('kyeshi-mode'); } else { mainConsole.classList.remove('kyeshi-mode'); }
+            if (data.isKyeShi) { mainConsole.classList.add('kyeshi-mode'); } else { mainConsole.classList.remove('kyeshi-mode'); }
 
             if (!data.winnerDeclared || data.matchFinished) {
                 document.getElementById('ptg-display').style.display = 'none';
-                document.getElementById('r-score').classList.remove('score-flash');
-                document.getElementById('b-score').classList.remove('score-flash');
+                rScoreEl.classList.remove('score-flash');
+                bScoreEl.classList.remove('score-flash');
             } else {
-                if (data.winSide === 'red') document.getElementById('r-score').classList.add('score-flash');
-                if (data.winSide === 'blue') document.getElementById('b-score').classList.add('score-flash');
+                if (data.winSide === 'red') rScoreEl.classList.add('score-flash');
+                if (data.winSide === 'blue') bScoreEl.classList.add('score-flash');
                 if (data.isPtg) document.getElementById('ptg-display').style.display = 'block';
             }
 
-            if (data.needTieBreaker && !data.winnerDeclared && sessionStorage.getItem('view_role') !== 'tivi') {
+            if (data.needTieBreaker && !data.winnerDeclared && !isTvWindow()) {
                 document.getElementById('tie-selection-ui').style.display = 'flex';
             } else {
                 document.getElementById('tie-selection-ui').style.display = 'none';
             }
 
             const mGj = Number(data.maxGj) || 0;
-            if (!data.matchFinished && mGj > 0 && data.rG >= mGj) {
-                document.getElementById('r-pun').style.display = 'inline-block';
-            } else {
-                document.getElementById('r-pun').style.display = 'none';
-            }
-            if (!data.matchFinished && mGj > 0 && data.bG >= mGj) {
-                document.getElementById('b-pun').style.display = 'inline-block';
-            } else {
-                document.getElementById('b-pun').style.display = 'none';
-            }
+            document.getElementById('r-pun').style.display = (!data.matchFinished && mGj > 0 && data.rG >= mGj) ? 'inline-block' : 'none';
+            document.getElementById('b-pun').style.display = (!data.matchFinished && mGj > 0 && data.bG >= mGj) ? 'inline-block' : 'none';
 
-            document.getElementById('btn-timer-ctrl').innerText = data.run ? "DỪNG" : "BẮT ĐẦU";
-            document.getElementById('match-num-display').innerText = data.matchNum || 1;
-            document.getElementById('top-title-display').innerText = data.topTitle || "BẢNG ĐIỂM FOX-TAEKWONDO";
+            const btnTimerCtrl = document.getElementById('btn-timer-ctrl');
+            const targetBtnText = data.run ? "DỪNG" : "BẮT ĐẦU";
+            if (btnTimerCtrl.innerText !== targetBtnText) btnTimerCtrl.innerText = targetBtnText;
+
+            const matchNumDisp = document.getElementById('match-num-display');
+            const mNumStr = String(data.matchNum || 1);
+            if (matchNumDisp.innerText !== mNumStr) matchNumDisp.innerText = mNumStr;
+
+            const topTitleDisp = document.getElementById('top-title-display');
+            const tTitleStr = data.topTitle || "BẢNG ĐIỂM FOX-TAEKWONDO";
+            if (topTitleDisp.innerText !== tTitleStr) topTitleDisp.innerText = tTitleStr;
 
             const contentEl = document.getElementById('match-content-display');
             const mContent = (data.matchContent || "").trim();
-            contentEl.innerText = mContent;
+            if (contentEl.innerText !== mContent) contentEl.innerText = mContent;
             if (mContent.length > 0 && !data.matchFinished) {
                 contentEl.style.display = 'block';
                 if (mContent.length <= 12) {
@@ -2324,53 +2420,181 @@
             document.getElementById('one-ref-toggle').checked = data.oneRefMode || false;
             document.getElementById('gap-toggle').checked = data.gapEnabled || false;
             
-            updateDots('b-wins', data.bW); updateDots('r-wins', data.rW);
-            updateLogs('r', data.rLogs); updateLogs('b', data.bLogs);
+            updateDots('b-wins', data.bW);
+            updateDots('r-wins', data.rW);
+            updateLogs('r', data.rLogs);
+            updateLogs('b', data.bLogs);
+        }
 
-            if (data.run && !timerInterval) { currentData.time = data.time; startLocalTimer(); } 
-            else if (!data.run && timerInterval) { stopLocalTimer(); currentData.time = data.time; updateTimerDisplay(currentData.time); }
-            if (!data.run) { currentData.time = data.time; updateTimerDisplay(data.time); }
-            currentData = data;
+        matchRef.on('value', (snap) => {
+            const data = snap.val();
+            if (!data) return;
+            
+            data.rLogs = data.rLogs || [];
+            data.bLogs = data.bLogs || [];
 
-            checkVictoryConditions();
+            const incomingTimerStamp = data.timerUpdatedAt || 0;
+            const isExplicitTimerChange = (incomingTimerStamp > 0 && incomingTimerStamp !== lastAppliedTimerUpdatedAt) ||
+                                          (data.isRest !== currentData.isRest) ||
+                                          (data.isKyeShi !== currentData.isKyeShi) ||
+                                          (data.round !== currentData.round);
+
+            if (incomingTimerStamp > 0) {
+                lastAppliedTimerUpdatedAt = incomingTimerStamp;
+            }
+
+            if (data.run && !timerInterval) {
+                // Đồng hồ bắt đầu chạy
+                currentData = Object.assign({}, currentData, data);
+                currentData.time = Number(data.time) || 0;
+                updateTimerDisplay(currentData.time);
+                startLocalTimer();
+            } else if (!data.run && timerInterval) {
+                // Đồng hồ vừa được bấm dừng
+                stopLocalTimer();
+                currentData = Object.assign({}, currentData, data);
+                currentData.time = Number(data.time) || 0;
+                updateTimerDisplay(currentData.time);
+            } else if (data.run && timerInterval) {
+                // QUAN TRỌNG: Khi đồng hồ đang chạy và có tín hiệu bấm điểm liên tục từ Firebase trả về,
+                // giữ nguyên thời gian thực đang đếm trên máy để đồng hồ KHÔNG BAO GIỜ bị khựng hoặc giật lùi!
+                const liveRunningTime = currentData.time;
+                currentData = Object.assign({}, currentData, data);
+                if (isExplicitTimerChange) {
+                    currentData.time = Number(data.time) || 0;
+                    lastTimerTick = performance.now();
+                    updateTimerDisplay(currentData.time);
+                } else if (isTvWindow() && Math.abs(liveRunningTime - (Number(data.time) || 0)) > 1.35) {
+                    currentData.time = Number(data.time) || 0;
+                    lastTimerTick = performance.now();
+                    updateTimerDisplay(currentData.time);
+                } else {
+                    currentData.time = liveRunningTime;
+                }
+            } else {
+                // Đồng hồ đang ở trạng thái dừng
+                currentData = Object.assign({}, currentData, data);
+                currentData.time = Number(data.time) || 0;
+                updateTimerDisplay(currentData.time);
+            }
+
+            renderScoreboardUI(currentData);
+            if (!isTvWindow()) {
+                checkVictoryConditions();
+            }
         });
 
         function updateTimerDisplay(t) {
             const display = document.getElementById('timer-display');
-            if (t > 0 && t <= 10) { display.classList.add('timer-alert'); } else { display.classList.remove('timer-alert'); }
+            const safeT = Math.max(0, Number(t) || 0);
+            const shouldAlert = (safeT > 0 && safeT <= 10);
+            if (shouldAlert !== domCache.timerAlert) {
+                domCache.timerAlert = shouldAlert;
+                if (shouldAlert) display.classList.add('timer-alert');
+                else display.classList.remove('timer-alert');
+            }
 
-            if (t > 10) {
-                let m = Math.floor(t / 60).toString().padStart(2, '0');
-                let s = Math.floor(t % 60).toString().padStart(2, '0');
-                display.innerText = `${m}:${s}`;
+            let newText = "";
+            if (safeT > 10) {
+                let m = Math.floor(safeT / 60).toString().padStart(2, '0');
+                let s = Math.floor(safeT % 60).toString().padStart(2, '0');
+                newText = `${m}:${s}`;
             } else {
-                let s = Math.floor(t).toString().padStart(2, '0');
-                let ms = Math.floor((t % 1) * 100).toString().padStart(2, '0');
-                display.innerText = `${s}.${ms}`;
+                let s = Math.floor(safeT).toString().padStart(2, '0');
+                let ms = Math.floor((safeT % 1) * 100).toString().padStart(2, '0');
+                newText = `${s}.${ms}`;
+            }
+
+            if (newText !== domCache.timerText) {
+                domCache.timerText = newText;
+                display.innerText = newText;
             }
         }
 
-        function toggleTimer() { matchRef.update({ run: !currentData.run, time: currentData.time }); }
+        function toggleTimer() {
+            const nextRun = !currentData.run;
+            const syncedTime = Number((currentData.time || 0).toFixed(2));
+            const stamp = Date.now();
+            currentData.run = nextRun;
+            currentData.time = syncedTime;
+            currentData.timerUpdatedAt = stamp;
+            lastAppliedTimerUpdatedAt = stamp;
 
-        function startLocalTimer() {
-            if (timerInterval) clearInterval(timerInterval);
-            timerInterval = setInterval(() => {
-                if (currentData.time > 0) {
-                    currentData.time -= 0.01; updateTimerDisplay(currentData.time);
-                    if (Math.abs(currentData.time % 1) < 0.01) matchRef.update({ time: Math.round(currentData.time) });
-                } else { 
-                    stopLocalTimer();
-                    if (currentData.isKyeShi) { matchRef.update({ run: false, time: 0 }); } 
-                    else if (currentData.isRest) { matchRef.update({ run: false, time: getSetMatchTime(), isRest: false }); } 
-                    else { handleAutoTimeUp(); }
-                }
-            }, 10);
+            if (nextRun) {
+                startLocalTimer();
+            } else {
+                stopLocalTimer();
+            }
+            updateTimerDisplay(syncedTime);
+            renderScoreboardUI(currentData);
+
+            const payload = { run: nextRun, time: syncedTime, timerUpdatedAt: stamp };
+            broadcastLocalFastSync('timer_sync', payload);
+            matchRef.update(payload);
         }
 
-        function stopLocalTimer() { clearInterval(timerInterval); timerInterval = null; }
+        // Bộ đếm thời gian thực dựa trên performance.now() - Chống đứng đồng hồ tuyệt đối khi bấm điểm liên tục
+        function startLocalTimer() {
+            if (timerInterval) clearInterval(timerInterval);
+            lastTimerTick = performance.now();
+            lastSyncedWholeSec = Math.ceil(currentData.time);
+
+            timerInterval = setInterval(() => {
+                const nowPerf = performance.now();
+                const elapsed = Math.max(0, (nowPerf - lastTimerTick) / 1000);
+                lastTimerTick = nowPerf;
+
+                if (currentData.time > 0) {
+                    currentData.time = Math.max(0, currentData.time - elapsed);
+                    updateTimerDisplay(currentData.time);
+
+                    // Chỉ màn hình Thư ký mới đồng bộ mốc giây chuẩn lên Firebase (mỗi giây 1 lần)
+                    if (!isTvWindow()) {
+                        const curWholeSec = Math.ceil(currentData.time);
+                        if (curWholeSec !== lastSyncedWholeSec) {
+                            lastSyncedWholeSec = curWholeSec;
+                            matchRef.update({ time: Number(currentData.time.toFixed(2)) });
+                        }
+                    }
+                } else { 
+                    stopLocalTimer();
+                    currentData.time = 0;
+                    updateTimerDisplay(0);
+
+                    if (!isTvWindow()) {
+                        const stamp = Date.now();
+                        lastAppliedTimerUpdatedAt = stamp;
+                        if (currentData.isKyeShi) {
+                            const payload = { run: false, time: 0, timerUpdatedAt: stamp };
+                            Object.assign(currentData, payload);
+                            renderScoreboardUI(currentData);
+                            broadcastLocalFastSync('timer_sync', payload);
+                            matchRef.update(payload);
+                        } else if (currentData.isRest) {
+                            const nextMatchTime = getSetMatchTime();
+                            const payload = { run: false, time: nextMatchTime, isRest: false, timerUpdatedAt: stamp };
+                            Object.assign(currentData, payload);
+                            updateTimerDisplay(nextMatchTime);
+                            renderScoreboardUI(currentData);
+                            broadcastLocalFastSync('timer_sync', payload);
+                            matchRef.update(payload);
+                        } else {
+                            handleAutoTimeUp();
+                        }
+                    }
+                }
+            }, 25);
+        }
+
+        function stopLocalTimer() {
+            if (timerInterval) {
+                clearInterval(timerInterval);
+                timerInterval = null;
+            }
+        }
 
         function checkVictoryConditions() {
-            if (currentData.winnerDeclared) return;
+            if (isTvWindow() || currentData.winnerDeclared) return;
             let rWin = false; let bWin = false; let isPtg = false; let punLoser = "";
 
             if (currentData.maxGj > 0) {
@@ -2395,13 +2619,24 @@
 
         function handleAutoTimeUp() {
             if (currentData.winnerDeclared) return;
-            matchRef.update({ run: false, time: 0 });
+            const stamp = Date.now();
+            lastAppliedTimerUpdatedAt = stamp;
+            currentData.run = false;
+            currentData.time = 0;
+            currentData.timerUpdatedAt = stamp;
+            matchRef.update({ run: false, time: 0, timerUpdatedAt: stamp });
+            broadcastLocalFastSync('timer_sync', { run: false, time: 0, timerUpdatedAt: stamp });
+
             if (currentData.rS > currentData.bS) { celebrateWinner('red', 'red-box'); } 
             else if (currentData.bS > currentData.rS) { celebrateWinner('blue', 'blue-box'); } 
             else {
                 let winSide = autoCheckTieBreak(currentData);
                 if (winSide) { celebrateWinner(winSide, winSide === 'red' ? 'red-box' : 'blue-box'); } 
-                else { matchRef.update({ needTieBreaker: true }); }
+                else {
+                    currentData.needTieBreaker = true;
+                    renderScoreboardUI(currentData);
+                    matchRef.update({ needTieBreaker: true });
+                }
             }
         }
 
@@ -2422,6 +2657,7 @@
         }
 
         function pickTieWinner(side) {
+            currentData.needTieBreaker = false;
             matchRef.update({ needTieBreaker: false }); 
             celebrateWinner(side, side === 'red' ? 'red-box' : 'blue-box');
         }
@@ -2436,7 +2672,19 @@
                 else if (winSide === 'blue' && currentData.rG >= mGj) punLoser = 'red';
             }
 
-            let updates = { run: false, winnerDeclared: true, winSide: winSide, isPtg: isPtg, needTieBreaker: false };
+            const stamp = Date.now();
+            lastAppliedTimerUpdatedAt = stamp;
+            stopLocalTimer();
+
+            let updates = {
+                run: false,
+                time: Number((currentData.time || 0).toFixed(2)),
+                timerUpdatedAt: stamp,
+                winnerDeclared: true,
+                winSide: winSide,
+                isPtg: isPtg,
+                needTieBreaker: false
+            };
 
             if (curRound === 1) { updates.rR1 = currentData.rS; updates.bR1 = currentData.bS; updates.wR1 = winSide; updates.punR1 = punLoser; }
             else if (curRound === 2) { updates.rR2 = currentData.rS; updates.bR2 = currentData.bS; updates.wR2 = winSide; updates.punR2 = punLoser; }
@@ -2445,8 +2693,10 @@
             if (winSide === 'red') updates.rW = (currentData.rW || 0) + 1;
             else updates.bW = (currentData.bW || 0) + 1;
 
+            Object.assign(currentData, updates);
+            renderScoreboardUI(currentData);
+            broadcastLocalFastSync('timer_sync', updates);
             matchRef.update(updates);
-            stopLocalTimer();
             
             const scoreId = winSide === 'red' ? 'r-score' : 'b-score';
             document.getElementById(scoreId).classList.add('score-flash');
@@ -2462,7 +2712,17 @@
                 else {
                     let winSideTie = autoCheckTieBreak();
                     if (winSideTie) winSide = winSideTie;
-                    else { matchRef.update({ run: false, needTieBreaker: true }); return; }
+                    else {
+                        stopLocalTimer();
+                        const stamp = Date.now();
+                        lastAppliedTimerUpdatedAt = stamp;
+                        const payload = { run: false, time: Number((currentData.time || 0).toFixed(2)), needTieBreaker: true, timerUpdatedAt: stamp };
+                        Object.assign(currentData, payload);
+                        renderScoreboardUI(currentData);
+                        broadcastLocalFastSync('timer_sync', payload);
+                        matchRef.update(payload);
+                        return;
+                    }
                 }
                 celebrateWinner(winSide, winSide === 'red' ? 'red-box' : 'blue-box');
             } else {
@@ -2477,9 +2737,13 @@
             let curRound = currentData.round || 1;
 
             if (rWins >= 2 || bWins >= 2) {
-                if(!currentData.matchFinished) {
+                if (!currentData.matchFinished) {
                     let matchWinner = rWins >= 2 ? "red" : "blue";
-                    matchRef.update({ matchFinished: true, matchWinnerSide: matchWinner });
+                    const payload = { matchFinished: true, matchWinnerSide: matchWinner };
+                    Object.assign(currentData, payload);
+                    renderScoreboardUI(currentData);
+                    broadcastLocalFastSync('score_delta', payload);
+                    matchRef.update(payload);
                     return; 
                 } else {
                     let nextNum = (parseInt(currentMatch, 10) || 1) + 1;
@@ -2489,9 +2753,13 @@
             }
 
             if (curRound >= 3) {
-                if(!currentData.matchFinished) {
+                if (!currentData.matchFinished) {
                     let matchWinner = rWins > bWins ? "red" : (bWins > rWins ? "blue" : "tie");
-                    matchRef.update({ matchFinished: true, matchWinnerSide: matchWinner });
+                    const payload = { matchFinished: true, matchWinnerSide: matchWinner };
+                    Object.assign(currentData, payload);
+                    renderScoreboardUI(currentData);
+                    broadcastLocalFastSync('score_delta', payload);
+                    matchRef.update(payload);
                     return; 
                 } else {
                     let nextNum = (parseInt(currentMatch, 10) || 1) + 1;
@@ -2499,6 +2767,10 @@
                     return;
                 }
             }
+
+            const stamp = Date.now();
+            lastAppliedTimerUpdatedAt = stamp;
+            stopLocalTimer();
 
             let nextRoundData = { 
                 bS:0,rS:0,bG:0,rG:0, bW:currentData.bW || 0, rW:currentData.rW || 0, round: nextRound, time:getSetMatchTime(),
@@ -2509,16 +2781,24 @@
                 rR3: (currentData.rR3 !== undefined && currentData.rR3 !== "") ? currentData.rR3 : "", bR3: (currentData.bR3 !== undefined && currentData.bR3 !== "") ? currentData.bR3 : "",
                 wR1: currentData.wR1 || "", wR2: currentData.wR2 || "", wR3: currentData.wR3 || "",
                 punR1: currentData.punR1 || "", punR2: currentData.punR2 || "", punR3: currentData.punR3 || "",
-                matchFinished: false, matchWinnerSide: ""
+                matchFinished: false, matchWinnerSide: "", timerUpdatedAt: stamp
             };
 
+            currentData = Object.assign({}, currentData, nextRoundData);
+            updateTimerDisplay(nextRoundData.time);
+            renderScoreboardUI(currentData);
+            broadcastLocalFastSync('timer_sync', nextRoundData);
             matchRef.set(nextRoundData);
             hitsRef.remove(); recentHits = []; recentRefAwards = []; recentDirectPoints = [];
         }
 
         function resetForNextMatch(nextMatchNum) {
             const foundNext = matchListData.find(m => String(m.matchNum).toUpperCase() === String(nextMatchNum).toUpperCase());
-            matchRef.set({
+            const stamp = Date.now();
+            lastAppliedTimerUpdatedAt = stamp;
+            stopLocalTimer();
+
+            const nextMatchData = {
                 bS:0,rS:0,bG:0,rG:0,bW:0,rW:0,round:1, time:getSetMatchTime(), run:false,isRest:false, isKyeShi:false, savedMatchTime: 0,
                 rName: foundNext ? foundNext.rName : "HONG",
                 bName: foundNext ? foundNext.bName : "CHUNG",
@@ -2529,8 +2809,14 @@
                 r6:0, r4:0, r3:0, r2:0, r1:0, b6:0, b4:0, b3:0, b2:0, b1:0,
                 rR1: "", bR1: "", rR2: "", bR2: "", rR3: "", bR3: "", wR1: "", wR2: "", wR3: "",
                 punR1: "", punR2: "", punR3: "",
-                matchFinished: false, matchWinnerSide: ""
-            });
+                matchFinished: false, matchWinnerSide: "", timerUpdatedAt: stamp
+            };
+
+            currentData = Object.assign({}, currentData, nextMatchData);
+            updateTimerDisplay(nextMatchData.time);
+            renderScoreboardUI(currentData);
+            broadcastLocalFastSync('timer_sync', nextMatchData);
+            matchRef.set(nextMatchData);
             hitsRef.remove(); recentHits = []; recentRefAwards = []; recentDirectPoints = [];
         }
 
@@ -2540,20 +2826,26 @@
             const logText = (xoayApplied && (pts === 2 || pts === 3) ? finalPts + " Xoay" : finalPts) + " (" + refName + ")";
             if (!currentData[side + 'Logs']) currentData[side + 'Logs'] = [];
             currentData[side + 'Logs'].push(logText); 
-            currentData[side + 'S'] += finalPts; 
-            
-            // LƯU ƯU THẾ KHI TRỌNG TÀI BẤM
+            currentData[side + 'S'] = (currentData[side + 'S'] || 0) + finalPts; 
             currentData[side + finalPts] = (currentData[side + finalPts] || 0) + 1;
             
             const logIndex = currentData[side + 'Logs'].length - 1;
             const awardRecord = { side: side, basePts: basePts, finalPts: finalPts, refIds: refName.split(','), refTimes: refTimes || refName.split(',').map(id => ({ refId: id, time: pointTime })), time: pointTime, logIndex: logIndex, xoayApplied: finalPts !== basePts };
             recentRefAwards.push(awardRecord);
             recentRefAwards = recentRefAwards.filter(a => (Date.now() - a.time) < 2000);
-            matchRef.update(currentData);
+
+            const delta = {};
+            delta[side + 'S'] = currentData[side + 'S'];
+            delta[side + finalPts] = currentData[side + finalPts];
+            delta[side + 'Logs'] = currentData[side + 'Logs'];
+            applyScoreDeltaImmediate(delta);
             return awardRecord;
         }
 
         hitsRef.on('child_added', (snap) => {
+            // Chỉ màn hình Thư Ký xử lý tín hiệu hits từ điện thoại để tránh xung đột với màn hình Tivi
+            if (isTvWindow()) return;
+
             const hit = snap.val(); const hitKey = snap.key;
             db.ref('hits/' + hitKey).remove();
 
@@ -2610,10 +2902,11 @@
 
         function applyXoayToAwardRecord(record) {
             if (!record || record.xoayApplied || (record.basePts !== 2 && record.basePts !== 3)) return;
+            const oldPts = record.finalPts;
             const newPts = record.basePts * 2;
-            currentData[record.side + 'S'] += (newPts - record.finalPts);
+            currentData[record.side + 'S'] = (currentData[record.side + 'S'] || 0) + (newPts - oldPts);
             
-            if (currentData[record.side + record.finalPts] > 0) currentData[record.side + record.finalPts]--;
+            if (currentData[record.side + oldPts] > 0) currentData[record.side + oldPts]--;
             currentData[record.side + newPts] = (currentData[record.side + newPts] || 0) + 1;
 
             const logs = currentData[record.side + 'Logs'] || [];
@@ -2623,7 +2916,13 @@
 
             record.finalPts = newPts;
             record.xoayApplied = true;
-            matchRef.update(currentData);
+
+            const delta = {};
+            delta[record.side + 'S'] = currentData[record.side + 'S'];
+            delta[record.side + oldPts] = currentData[record.side + oldPts] || 0;
+            delta[record.side + newPts] = currentData[record.side + newPts];
+            delta[record.side + 'Logs'] = logs;
+            applyScoreDeltaImmediate(delta);
         }
 
         function forwardToMatcher(type, refId, pointTime = Date.now()) {
@@ -2743,7 +3042,12 @@
                 isSub: false
             });
             recentDirectPoints = recentDirectPoints.filter(p => (Date.now() - p.time) < 3000);
-            matchRef.update(currentData);
+
+            const delta = {};
+            delta[side + 'S'] = currentData[side + 'S'];
+            delta[side + pts] = currentData[side + pts];
+            delta[side + 'Logs'] = currentData[side + 'Logs'];
+            applyScoreDeltaImmediate(delta);
         }
 
         function executeSecretaryConvertNearestPoint(side, oldPt, newPt, isNewXoay = false) {
@@ -2773,7 +3077,12 @@
                 currentData[side + 'Logs'].push(`${newPrefix} (Thư ký)`);
             }
 
-            matchRef.update(currentData);
+            const delta = {};
+            delta[side + 'S'] = currentData[side + 'S'];
+            delta[side + oldPt] = currentData[side + oldPt] || 0;
+            delta[side + newPt] = currentData[side + newPt];
+            delta[side + 'Logs'] = currentData[side + 'Logs'];
+            applyScoreDeltaImmediate(delta);
         }
 
         function executeSecretaryRemoveNearestPoint(side, ptVal) {
@@ -2807,7 +3116,12 @@
                 isSub: true
             });
             recentDirectPoints = recentDirectPoints.filter(p => (Date.now() - p.time) < 3000);
-            matchRef.update(currentData);
+
+            const delta = {};
+            delta[side + 'S'] = currentData[side + 'S'];
+            delta[side + ptVal] = currentData[side + ptVal] || 0;
+            delta[side + 'Logs'] = currentData[side + 'Logs'] || [];
+            applyScoreDeltaImmediate(delta);
         }
 
         function toggleXoay(side) {
@@ -2824,8 +3138,9 @@
                     }
                     const extraSub = spinPtToRemove - target.finalPts;
                     if ((currentData[side + 'S'] || 0) >= extraSub) {
+                        const prevPt = target.finalPts;
                         currentData[side + 'S'] -= extraSub;
-                        currentData[side + target.finalPts] = (currentData[side + target.finalPts] || 0) + 1;
+                        currentData[side + prevPt] = (currentData[side + prevPt] || 0) + 1;
                         if (target.removedLogText) {
                             if (!currentData[side + 'Logs']) currentData[side + 'Logs'] = [];
                             currentData[side + 'Logs'].push(target.removedLogText);
@@ -2842,14 +3157,21 @@
                         target.finalPts = spinPtToRemove;
                         target.xoayApplied = true;
                         setXoayArmedState(side, false);
-                        matchRef.update(currentData);
+
+                        const delta = {};
+                        delta[side + 'S'] = currentData[side + 'S'];
+                        delta[side + prevPt] = currentData[side + prevPt];
+                        delta[side + spinPtToRemove] = currentData[side + spinPtToRemove] || 0;
+                        delta[side + 'Logs'] = currentData[side + 'Logs'] || [];
+                        applyScoreDeltaImmediate(delta);
                     }
                     return;
                 }
 
+                const oldPts = target.finalPts;
                 const newPts = target.pts * 2;
-                currentData[side + 'S'] += (newPts - target.finalPts);
-                if ((currentData[side + target.finalPts] || 0) > 0) currentData[side + target.finalPts]--;
+                currentData[side + 'S'] += (newPts - oldPts);
+                if ((currentData[side + oldPts] || 0) > 0) currentData[side + oldPts]--;
                 currentData[side + newPts] = (currentData[side + newPts] || 0) + 1;
 
                 if (currentData[side + 'Logs'] && currentData[side + 'Logs'][target.logIndex] !== undefined) {
@@ -2859,7 +3181,13 @@
                 target.finalPts = newPts;
                 target.xoayApplied = true;
                 setXoayArmedState(side, false);
-                matchRef.update(currentData);
+
+                const delta = {};
+                delta[side + 'S'] = currentData[side + 'S'];
+                delta[side + oldPts] = currentData[side + oldPts] || 0;
+                delta[side + newPts] = currentData[side + newPts];
+                delta[side + 'Logs'] = currentData[side + 'Logs'] || [];
+                applyScoreDeltaImmediate(delta);
                 return;
             }
 
@@ -2870,11 +3198,12 @@
             if (pendingXoayTarget && doUpgrade) {
                 const target = pendingXoayTarget;
                 const side = target.side;
+                const oldPts = target.finalPts;
                 const newPts = target.pts * 2;
                 
-                currentData[side + 'S'] += (newPts - target.finalPts);
+                currentData[side + 'S'] += (newPts - oldPts);
                 
-                if (currentData[side + target.finalPts] > 0) currentData[side + target.finalPts]--;
+                if (currentData[side + oldPts] > 0) currentData[side + oldPts]--;
                 currentData[side + newPts] = (currentData[side + newPts] || 0) + 1;
 
                 if (currentData[side + 'Logs'] && currentData[side + 'Logs'][target.logIndex] !== undefined) {
@@ -2883,7 +3212,13 @@
 
                 target.finalPts = newPts;
                 target.xoayApplied = true;
-                matchRef.update(currentData);
+
+                const delta = {};
+                delta[side + 'S'] = currentData[side + 'S'];
+                delta[side + oldPts] = currentData[side + oldPts] || 0;
+                delta[side + newPts] = currentData[side + newPts];
+                delta[side + 'Logs'] = currentData[side + 'Logs'] || [];
+                applyScoreDeltaImmediate(delta);
             }
             
             document.getElementById('xoay-upgrade-ui').style.display = 'none';
@@ -3066,9 +3401,22 @@
         }
 
         function updateLogs(side, logs) {
-            const container = document.getElementById(side + '-logs'); container.innerHTML = '';
-            const safeLogs = logs || []; 
-            safeLogs.forEach(val => { const div = document.createElement('div'); div.className = 'log-item'; div.innerText = '+' + val; container.appendChild(div); });
+            const safeLogs = logs || [];
+            const sig = safeLogs.join('||');
+            const cacheKey = side === 'r' ? 'rLogsSig' : 'bLogsSig';
+            if (domCache[cacheKey] === sig) return;
+            domCache[cacheKey] = sig;
+
+            const container = document.getElementById(side + '-logs');
+            container.innerHTML = '';
+            const frag = document.createDocumentFragment();
+            safeLogs.forEach(val => {
+                const div = document.createElement('div');
+                div.className = 'log-item';
+                div.innerText = '+' + val;
+                frag.appendChild(div);
+            });
+            container.appendChild(frag);
             container.scrollTop = container.scrollHeight;
         }
 
@@ -3085,7 +3433,14 @@
         function applyGj(ptsToOpponent) { if (pendingGjSide) { executeGj(pendingGjSide, ptsToOpponent); } closeGjModal(); }
 
         function executeGj(f, oppPts) {
-            currentData[f] += 1; const opp = f === 'bG' ? 'r' : 'b'; currentData[opp + 'S'] += oppPts; matchRef.update(currentData);
+            currentData[f] = (currentData[f] || 0) + 1;
+            const opp = f === 'bG' ? 'r' : 'b';
+            currentData[opp + 'S'] = (currentData[opp + 'S'] || 0) + oppPts;
+
+            const delta = {};
+            delta[f] = currentData[f];
+            delta[opp + 'S'] = currentData[opp + 'S'];
+            applyScoreDeltaImmediate(delta);
         }
 
         function executeSubGj(f, oppPtsToSubtract) {
@@ -3093,7 +3448,11 @@
                 currentData[f] -= 1;
                 const opp = f === 'bG' ? 'r' : 'b';
                 currentData[opp + 'S'] = Math.max(0, (currentData[opp + 'S'] || 0) - oppPtsToSubtract);
-                matchRef.update(currentData);
+
+                const delta = {};
+                delta[f] = currentData[f];
+                delta[opp + 'S'] = currentData[opp + 'S'];
+                applyScoreDeltaImmediate(delta);
             }
         }
         
@@ -3121,28 +3480,91 @@
         }
 
         function updateRefPassword(id) { db.ref('referee_passwords/' + id).set(document.getElementById('pw-' + id).value); }
-        function updateTopTitle() { matchRef.update({ topTitle: document.getElementById('in-top-title').value }); }
-        function toggleOneRef() { matchRef.update({ oneRefMode: document.getElementById('one-ref-toggle').checked }); }
-        function updateRules() { matchRef.update({ maxGj: Number(document.getElementById('in-max-gj').value), maxPts: Number(document.getElementById('in-max-pts').value) }); }
-        function updateNames() { matchRef.update({ rName: document.getElementById('in-r-name').value || currentData.rName, bName: document.getElementById('in-b-name').value || currentData.bName }); }
-        function updateMatchNum() { matchRef.update({ matchNum: document.getElementById('in-match-num').value.trim().toUpperCase() || 1 }); }
+        function updateTopTitle() {
+            const val = document.getElementById('in-top-title').value;
+            applyScoreDeltaImmediate({ topTitle: val });
+        }
+        function toggleOneRef() {
+            const val = document.getElementById('one-ref-toggle').checked;
+            applyScoreDeltaImmediate({ oneRefMode: val });
+        }
+        function updateRules() {
+            const maxGj = Number(document.getElementById('in-max-gj').value);
+            const maxPts = Number(document.getElementById('in-max-pts').value);
+            applyScoreDeltaImmediate({ maxGj: maxGj, maxPts: maxPts });
+        }
+        function updateNames() {
+            const rName = document.getElementById('in-r-name').value || currentData.rName;
+            const bName = document.getElementById('in-b-name').value || currentData.bName;
+            applyScoreDeltaImmediate({ rName: rName, bName: bName });
+        }
+        function updateMatchNum() {
+            const matchNum = document.getElementById('in-match-num').value.trim().toUpperCase() || 1;
+            applyScoreDeltaImmediate({ matchNum: matchNum });
+        }
         
         function setCustomTime() { 
-            if (currentData.isKyeShi && currentData.savedMatchTime !== undefined) { matchRef.update({ time: currentData.savedMatchTime, isRest: false, isKyeShi: false, run: false }); } 
-            else { matchRef.update({ time: getSetMatchTime(), isRest: false, isKyeShi: false, run: false }); }
+            stopLocalTimer();
+            const stamp = Date.now();
+            lastAppliedTimerUpdatedAt = stamp;
+            const nextTime = (currentData.isKyeShi && currentData.savedMatchTime !== undefined) ? currentData.savedMatchTime : getSetMatchTime();
+            const payload = { time: nextTime, isRest: false, isKyeShi: false, run: false, timerUpdatedAt: stamp };
+            Object.assign(currentData, payload);
+            updateTimerDisplay(nextTime);
+            renderScoreboardUI(currentData);
+            broadcastLocalFastSync('timer_sync', payload);
+            matchRef.update(payload);
         }
         
-        function setRestTime() { matchRef.update({ time: (parseInt(document.getElementById('in-rest-min').value)*60) + parseInt(document.getElementById('in-rest-sec').value), isRest: true, run: false, isKyeShi: false }); }
+        function setRestTime() {
+            stopLocalTimer();
+            const stamp = Date.now();
+            lastAppliedTimerUpdatedAt = stamp;
+            const restSeconds = ((parseInt(document.getElementById('in-rest-min').value) || 0) * 60) + (parseInt(document.getElementById('in-rest-sec').value) || 0);
+            const payload = { time: restSeconds, isRest: true, run: false, isKyeShi: false, timerUpdatedAt: stamp };
+            Object.assign(currentData, payload);
+            updateTimerDisplay(restSeconds);
+            renderScoreboardUI(currentData);
+            broadcastLocalFastSync('timer_sync', payload);
+            matchRef.update(payload);
+        }
         
         function setKyeShiTime() { 
-            let timeToSave = currentData.time; if (currentData.isKyeShi) { timeToSave = currentData.savedMatchTime; }
-            matchRef.update({ time: 60, savedMatchTime: timeToSave, isRest: false, isKyeShi: true, run: true }); 
+            let timeToSave = currentData.time;
+            if (currentData.isKyeShi) { timeToSave = currentData.savedMatchTime; }
+            const stamp = Date.now();
+            lastAppliedTimerUpdatedAt = stamp;
+            const payload = { time: 60, savedMatchTime: timeToSave, isRest: false, isKyeShi: true, run: true, timerUpdatedAt: stamp };
+            Object.assign(currentData, payload);
+            updateTimerDisplay(60);
+            startLocalTimer();
+            renderScoreboardUI(currentData);
+            broadcastLocalFastSync('timer_sync', payload);
+            matchRef.update(payload);
         }
 
-        function toggleGap() { matchRef.update({ gapEnabled: document.getElementById('gap-toggle').checked }); }
-        function flash(id, className) { const el = document.getElementById(id); el.classList.remove('flash', 'flash-winner'); void el.offsetWidth; el.classList.add(className); }
+        function toggleGap() {
+            const val = document.getElementById('gap-toggle').checked;
+            applyScoreDeltaImmediate({ gapEnabled: val });
+        }
+
+        // Bỏ void el.offsetWidth để tránh trình duyệt bị khựng (reflow) khi bấm điểm liên tục
+        function flash(id, className) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.classList.remove('flash', 'flash-winner');
+            requestAnimationFrame(() => {
+                el.classList.add(className);
+            });
+        }
         
-        function updateDots(id, count) { const el = document.getElementById(id); if(el) el.innerText = count || 0; }
+        function updateDots(id, count) {
+            const el = document.getElementById(id);
+            if (el) {
+                const str = String(count || 0);
+                if (el.innerText !== str) el.innerText = str;
+            }
+        }
 
         function adjustScoreSize(id, score, isMatchFinished = false) { 
             const el = document.getElementById(id); 
@@ -3160,24 +3582,34 @@
                 baseVw = baseVw * 0.72;
                 maxVh = maxVh * 0.65;
             }
-            el.style.fontSize = `min(${baseVw}vw, ${maxVh}vh)`; 
+            const targetSize = `min(${baseVw}vw, ${maxVh}vh)`;
+            if (el.style.fontSize !== targetSize) {
+                el.style.fontSize = targetSize;
+            }
         }
         
         function resetAll() { 
-            if(confirm("Reset toàn bộ trận đấu?")) { 
+            if (confirm("Reset toàn bộ trận đấu?")) { 
                 stopLocalTimer(); 
                 closeSecretaryActionModal();
                 setXoayArmedState('r', false);
                 setXoayArmedState('b', false);
-                matchRef.set({
+                const stamp = Date.now();
+                lastAppliedTimerUpdatedAt = stamp;
+                const resetPayload = {
                     bS:0,rS:0,bG:0,rG:0,bW:0,rW:0,round:1, time:getSetMatchTime() || 120, run:false,isRest:false, isKyeShi:false, savedMatchTime: 0,
                     rName:currentData.rName || "HONG", bName:currentData.bName || "CHUNG", rLogs:[],bLogs:[], gapEnabled:!!currentData.gapEnabled, 
                     oneRefMode: !!currentData.oneRefMode, winnerDeclared: false, winSide: "", isPtg: false, needTieBreaker: false,
                     maxGj: currentData.maxGj || 0, maxPts: currentData.maxPts || 0, matchNum: currentData.matchNum || 1, topTitle: currentData.topTitle || "BẢNG ĐIỂM FOX-TAEKWONDO", matchContent: currentData.matchContent || "",
                     r6:0, r4:0, r3:0, r2:0, r1:0, b6:0, b4:0, b3:0, b2:0, b1:0, rR1: "", bR1: "", rR2: "", bR2: "", rR3: "", bR3: "", wR1: "", wR2: "", wR3: "",
                     punR1: "", punR2: "", punR3: "",
-                    matchFinished: false, matchWinnerSide: ""
-                }); 
+                    matchFinished: false, matchWinnerSide: "", timerUpdatedAt: stamp
+                };
+                currentData = Object.assign({}, currentData, resetPayload);
+                updateTimerDisplay(resetPayload.time);
+                renderScoreboardUI(currentData);
+                broadcastLocalFastSync('timer_sync', resetPayload);
+                matchRef.set(resetPayload); 
                 hitsRef.remove(); recentHits = []; recentRefAwards = []; recentDirectPoints = [];
             } 
         }
@@ -3188,6 +3620,7 @@
         currentData.winReason = "";
 
         db.ref('schema_queue').on('value', (snap) => {
+            if (isTvWindow()) return;
             const queueData = snap.val();
             const incomingList = queueData ? (Array.isArray(queueData) ? queueData : Object.values(queueData)) : [];
 
@@ -3211,7 +3644,7 @@
             if (!currentData.run && !currentData.matchFinished && (currentData.rS || 0) === 0 && (currentData.bS || 0) === 0 && schemaMatches.length > 0) {
                 const matchOnScreen = schemaMatches.find(m => String(m.matchNum).toUpperCase() === String(currentData.matchNum).toUpperCase());
                 if (matchOnScreen && (currentData.bName === "CHUNG" || currentData.rName === "HONG" || !currentData.schemaMatchId || currentData.bName.includes("Chờ kết quả") || currentData.rName.includes("Chờ kết quả"))) {
-                    matchRef.update({
+                    applyScoreDeltaImmediate({
                         rName: matchOnScreen.rName,
                         bName: matchOnScreen.bName,
                         matchContent: matchOnScreen.content || "",
@@ -3243,7 +3676,9 @@
                     const contentLine = item.content ? `\nNội dung: ${item.content}` : '';
                     if (confirm(`Nạp dữ liệu TRẬN ${item.matchNum} lên bảng điểm?${contentLine}\n\nXanh: ${item.bName}\nĐỏ: ${item.rName}`)) {
                         stopLocalTimer();
-                        matchRef.set({
+                        const stamp = Date.now();
+                        lastAppliedTimerUpdatedAt = stamp;
+                        const matchPayload = {
                             bS:0, rS:0, bG:0, rG:0, bW:0, rW:0, round:1, time:getSetMatchTime() || 120,
                             run:false, isRest:false, isKyeShi:false, savedMatchTime:0,
                             rName: item.rName, bName: item.bName,
@@ -3259,8 +3694,13 @@
                             r6:0, r4:0, r3:0, r2:0, r1:0, b6:0, b4:0, b3:0, b2:0, b1:0,
                             rR1:"", bR1:"", rR2:"", bR2:"", rR3:"", bR3:"", wR1:"", wR2:"", wR3:"",
                             punR1:"", punR2:"", punR3:"",
-                            matchFinished:false, matchWinnerSide:""
-                        });
+                            matchFinished:false, matchWinnerSide:"", timerUpdatedAt: stamp
+                        };
+                        currentData = Object.assign({}, currentData, matchPayload);
+                        updateTimerDisplay(matchPayload.time);
+                        renderScoreboardUI(currentData);
+                        broadcastLocalFastSync('timer_sync', matchPayload);
+                        matchRef.set(matchPayload);
                         hitsRef.remove();
                         recentHits = []; recentRefAwards = []; recentDirectPoints = [];
                     }
@@ -3285,7 +3725,9 @@
         resetForNextMatch = function(nextMatchNum) {
             const foundNext = matchListData.find(m => String(m.matchNum).toUpperCase() === String(nextMatchNum).toUpperCase());
             stopLocalTimer();
-            matchRef.set({
+            const stamp = Date.now();
+            lastAppliedTimerUpdatedAt = stamp;
+            const nextPayload = {
                 bS:0,rS:0,bG:0,rG:0,bW:0,rW:0,round:1, time:getSetMatchTime(), run:false,isRest:false, isKyeShi:false, savedMatchTime: 0,
                 rName: foundNext ? foundNext.rName : "HONG",
                 bName: foundNext ? foundNext.bName : "CHUNG",
@@ -3299,8 +3741,13 @@
                 r6:0, r4:0, r3:0, r2:0, r1:0, b6:0, b4:0, b3:0, b2:0, b1:0,
                 rR1: "", bR1: "", rR2: "", bR2: "", rR3: "", bR3: "", wR1: "", wR2: "", wR3: "",
                 punR1: "", punR2: "", punR3: "",
-                matchFinished: false, matchWinnerSide: ""
-            });
+                matchFinished: false, matchWinnerSide: "", timerUpdatedAt: stamp
+            };
+            currentData = Object.assign({}, currentData, nextPayload);
+            updateTimerDisplay(nextPayload.time);
+            renderScoreboardUI(currentData);
+            broadcastLocalFastSync('timer_sync', nextPayload);
+            matchRef.set(nextPayload);
             hitsRef.remove(); recentHits = []; recentRefAwards = []; recentDirectPoints = [];
         };
 
@@ -3310,6 +3757,8 @@
             const keepMatchId = currentData.schemaMatchId || "";
             _origFinalizeRound();
             if (keepCatId || keepMatchId) {
+                currentData.schemaCatId = keepCatId;
+                currentData.schemaMatchId = keepMatchId;
                 matchRef.update({ schemaCatId: keepCatId, schemaMatchId: keepMatchId });
             }
         };
@@ -3320,6 +3769,9 @@
             const keepMatchId = currentData.schemaMatchId || "";
             _origResetAll();
             if (keepCatId || keepMatchId) {
+                currentData.schemaCatId = keepCatId;
+                currentData.schemaMatchId = keepMatchId;
+                currentData.winReason = "";
                 matchRef.update({ schemaCatId: keepCatId, schemaMatchId: keepMatchId, winReason: "" });
             }
         };
@@ -3334,8 +3786,12 @@
             }
 
             stopLocalTimer();
+            const stamp = Date.now();
+            lastAppliedTimerUpdatedAt = stamp;
             const updates = {
                 run: false,
+                time: Number((currentData.time || 0).toFixed(2)),
+                timerUpdatedAt: stamp,
                 winnerDeclared: true,
                 winSide: winnerSide,
                 matchFinished: true,
@@ -3346,6 +3802,9 @@
                 schemaCatId: currentData.schemaCatId || "",
                 schemaMatchId: currentData.schemaMatchId || ""
             };
+            Object.assign(currentData, updates);
+            renderScoreboardUI(currentData);
+            broadcastLocalFastSync('timer_sync', updates);
             matchRef.update(updates);
         }
     </script>
